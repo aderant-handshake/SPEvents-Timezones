@@ -10,7 +10,7 @@ when displayed on the firm home page for someone in Seattle, it will show Christ
  ## Solution Components
  The solution to this problem has several layers dealing with how all day events are stored, queried and displayed.  Some Assumptions to start:
 
- 1. The SharePoint Site Collection is set to the desired timezone. The specific timezone is no relevant to the solution, but it should be a known entity.
+ 1. The SharePoint Site Collection is set to the desired timezone. The specific timezone is not relevant to the solution, but it should be a known entity.
  2. Each user has the appropriate Timezone set for their SharePoint User Profile.  This will be the timezone SharePoint uses when that person creates an event in a SP Calendar.
  3. Each user has the appropriate setting for HSTimeZoneID - this is critical for the correct offset when executing a query. 
 
