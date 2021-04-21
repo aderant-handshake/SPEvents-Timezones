@@ -10,7 +10,7 @@ function AdjustAllDayEventLV(isallday, d) {
     }
 }
 
-// use this function in the oninialize property of an HTML5Scheduler. 
+// use this function in the onInitialize property of an HTML5Scheduler. 
 
 function AdjustAllDayEvents(options, startField, endField, allDayField) {
     // assumes the following fields exist in the HS Class, unless you override 
@@ -28,7 +28,7 @@ function AdjustAllDayEvents(options, startField, endField, allDayField) {
                     var dt = kendo.parseDate(event[startField]);
                     dt.setMinutes(dt.getMinutes() + dt.getTimezoneOffset());
                     event[startField] = dt;
-                } catch {
+                } catch(e) {
                     // nothing to do...
                 }
                 try {

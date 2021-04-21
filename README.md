@@ -1,192 +1,306 @@
-# Introduction 
-The "Christmas Day Problem" is not about how to assemble a 300 piece playhouse an hour before the kids get up. It  refers to a common 
-issue with events from a SharePoint Event List that are tagged as an All Day Event, and how those events are queried and displayed in
-Handshake controls. Left as is, when Christmas Day is entered in the firm calendar by someone who works in the London office, then
-when displayed on the firm home page for someone in Seattle, it will show Christmas Day being on Dec 24.
+# Handshake, SharePoint Events and Datetime Fields
 
- This solution shows you how to get all day events to display correctly regardless of the timezone of the SharePoint Server, the author 
- of the event or the person viewing that event. 
+> Does anyone really know what time it is? 
+> 
+> -- Chicago, October 1970
 
- ## Solution Components
- The solution to this problem has several layers dealing with how all day events are stored, queried and displayed.  Some Assumptions to start:
+## Introduction
+This guide will discuss and review information related to how the Handshake Toolkit (3.8 and better) and Kendo UI Controls work with querying and displaying the correct date and time from a SharePoint Event item. From the event being replicated by ListGuru/Mirror, relative to the users timezone established by their SharePoint user settings, to the item's presentation based on the user's current time zone. 
 
- 1. The SharePoint Site Collection is set to the desired timezone. The specific timezone is not relevant to the solution, but it should be a known entity.
- 2. Each user has the appropriate Timezone set for their SharePoint User Profile.  This will be the timezone SharePoint uses when that person creates an event in a SP Calendar.
- 3. Each user has the appropriate setting for HSTimeZoneID - this is critical for the correct offset when executing a query. 
+While this information is pertinent and important if you operate in a single time zone, it is **critical** if you operate in multiple time zones. Topics include
 
- ### Background 
- When creating/updating an all day event ListGuru will set the start end time of that event relative to the users SP TimeZone.  The problem with that is that except 
- for people in the UTC timezone, this "all day event" will span multiple days, and will likely display starting on the wrong date for users based on their timezone. 
+- [Introduction](#introduction)
+- [Included files](#included-files)
+  - [sample.js](#samplejs)
+  - [fn_AllDayAsUTC.sql](#fn_alldayasutcsql)
+  - [sp-UserTimezone.ps1](#sp-usertimezoneps1)
+- [Things to know about SharePoint Datetime Fields](#things-to-know-about-sharepoint-datetime-fields)
+- [From SharePoint to SQL](#from-sharepoint-to-sql)
+- [Querying Handshake Classes with UTC Dates](#querying-handshake-classes-with-utc-dates)
+  - [Identifying a field as a UTC field](#identifying-a-field-as-a-utc-field)
+  - [How Handshake Translates Dates to/from UTC](#how-handshake-translates-dates-tofrom-utc)
+  - [Returned Values for UTC and Non-UTC datetime fields](#returned-values-for-utc-and-non-utc-datetime-fields)
+- [Presenting Date and Times in Kendo Controls](#presenting-date-and-times-in-kendo-controls)
 
- Here is an example where several entries we created by "users" in London, Moscow, Auckland, etc. - 
+> Special Note: All Day Events have unique challenges when dealing with time zones and presenting those events correctly to people from Berlin to Honolulu.  The details are covered in the guide [The Christmas Day Challenge](christmas-day-challenge.md) 
 
-![Before Solution](images/image001.jpg)
+## Included files
 
-To further complicate matters, when a ListGuru table is dropped and re-mirrored all day events will be setup to midnight relative to the time 0 zone of the SharePoint Server.
+### sample.js 
+Includes javascript functions that may be used to properly parse an All Day Event to the users current time zone. And one that can be used in an HTML5Scheduler widget that will properly assign an all day event to the day relative to the users current time zone. Where current time zone = the time zone set on the users device.
 
-You can see a lot when you enter test events and evaluate the data stored in the ListGuru SQL Table.
-![SQL](images/image003.png)
- 
- ### Solution 
+### fn_AllDayAsUTC.sql
+A Sql function that will recast an all day event to be midnight UTC **regardless** of the time zone of the user that created the SharePoint event item. 
 
-#### Start/End Date from the HS Class
-  We need to retrieve the date of an all day event so that it is Midnight UTC, regardless of how the evert was entered.
-
- This can be done with the SQL Function found in [..\sql\fn_AllDayAsUTC.sql](sql/fn_AllDayAsUTC.sql)
-
- ```sql
- CREATE FUNCTION [dbo].[fn_AllDayAsUTC](@isallday as [int], @dt as [datetime], @asEnd as [int])
-/*
-INPUT
-	isAllDay: 1 or 0, if 1 then the event is set as an All Day Event
-	dt: date and time of the event, stored as UTC relative to the timezone of the author or the SP server.
-	asEnd: 1 or 0, return the start time of an all day event, or the end time. 
-*/
-RETURNS [datetime] AS
-BEGIN
-	DECLARE @dt1 [datetime]
-	
-	IF (@isAllDay=0) OR (DATEPART(HOUR,@dt) = 0 AND @asend=0) OR (DATEPART(HOUR,@dt) = 23 AND @asEnd=1) 
-		SET @dt1 = @dt 
-	ELSE
-	BEGIN
-		SET @dt1 = CASE 
-	
-			-- if the hour is < 11 (or 10 if end date) then the date part is correct, just convert it to 00:00 hours
-			WHEN @isallday = 1 AND DATEPART(HOUR,@dt) < (11 - @asend)
-				THEN DATEADD(Day, 0, DATEDIFF(Day, 0, @dt))
-
-			-- if the hour is 11:00 or greater, then the date part is a day behind what we want, convert to 00:00 hours and add a day.
-			WHEN @isallday = 1 
-				THEN DATEADD(Day, 1, DATEDIFF(Day, 0, @dt))
-
-			ELSE @dt
-		END	
-
-		IF @asEnd = 1 -- subtract 1 minute when this is the end date of an all day event
-			SET @dt1 = DATEADD(MINUTE, -1, @dt1)
-
-	END 
-	RETURN @dt1 
-
-END
-GO
+### sp-UserTimezone.ps1 
+SharePoint Management Module script to get and set the timezone for a specific user 
+```powershell
+    . ./SPUserTimeZone.ps1 
+    Add-PSSnapin Microsoft.SharePoint.PowerShell 
+    $portalUrl = 'https://portal2021.handshakedemo.com'
+    $me = "i:0#.w|handshakedemo\steve.mchargue" 
+    Get-SPUserTimeZone -portalUrl $portalUrl -userLogin $me
+    Set-SPUserTimeZone -portalUrl $portalUrl -userLogin $me -timezoneID 11
+    Get-SPTimeZones -portalUrl $portalUrl | Sort-Object -property ID | Format-Table id, description
 ```
 
-Use this function in the EventStart and EventDates of you Handshake Class, both should be set to UTC in the Categories section of the field :
+## Things to know about SharePoint Datetime Fields 
+When entering dates, even fields marked as "date only", SharePoint will store the timestamp as a UTC value based on the user's SharePoint time zone setting. This is true for all SharePoint date fields, even those not contained in Event list.  SharePoint **does not** take the user's current browser settings into account.  It relies exclusively on one of two settings:
 
-HSField: **EventDateStart**
-```
-dbo.fn_AllDayAsUTC( ev.[fAllDayEvent], ev.[EventDate], 0) 
-```
-HSField: **EventDateEnd**
-```
-dbo.fn_AllDayAsUTC( ev.[fAllDayEvent], ev.[EndDate], 1) 
-```
+1. The time zone setting for the current user in their site collection profile
+2. Or the time zone setting of the SharePoint site collection.
 
-#### Using start/end date in HTML5Scheduler 
-Now that we can be certain that start and end dates are UTC, we need to render them correctly using the Kendo Scheduler.  Left as is, the events will still span dates because Midnight UTC will still be transformed to an offset relative to the current users browser/workstation time zone.  This is the tricky bit (although not so tricky, once you see it worked out), because we need to transform the all day event to midnight relative to the current user before Kendo renders it with the scheduler. 
+> There is ample information available on the internet with regards to SharePoint and time zones, bizarrely almost none of it from Microsoft.  Here is a source I trust for [Setting proper SharePoint Time Zones for users](https://sharepointmaven.com/sharepoint-time-zone/).  
 
-We need this javascript function
-```javascript 
-function AdjustAllDayEvents(options, startField, endField, allDayField) {
-// assumes the following fields exist in the HS Class, unless you override 
-// in the call to the function in OnInitialize.
-    startField = startField || "eventdatestart";
-    endField = endField || "eventdateend";
-    allDayField = allDayField || "eventisallday";
+> A sample powershell script is included in this solution that you can modify to set the Site Collection time zone settings for your existing users, assuming you don't with to tell your lawyers to click here, here, here and initial here to set your proper time zone. 
 
-    options.dataSource.schema.parse = function(response) {
-    events = [];
-    for (var i = 0; i < response.d.results.length; i++) {
-        var event = response.d.results[i];
-        if (event[allDayField]) {
-        try {
-            var dt = kendo.parseDate(event[startField]);
-            dt.setMinutes(dt.getMinutes() + dt.getTimezoneOffset());
-            event[startField] = dt;
-        } catch {
-        // nothing to do...
-        }
-        try {
-            var dt = kendo.parseDate(event[endField]);
-            dt.setMinutes(dt.getMinutes() + dt.getTimezoneOffset());
-            event[endField] = dt;
-        } catch {
-        // nothing to do...
-        }
-        }
-        events.push(event);
-    }
-    response.d.results = events;
-    return response;
-    };
-};
-```
-Added to the oninitialize property of the HTML5Scheduler Widget
-```xml
-<html5scheduler 
-    mpinfo="RNConnect_FirmEvents!&lt;ALL&gt;" 
-    titlefield="title" 
-    startfield="eventDateStart" 
-    endfield="eventDateEnd" 
-    isalldayfield="eventIsAllDay" 
-    name="mytest" 
-    oninitialize="AdjustAllDayEvents(options);" 
-    eventidfield="spRecurrenceID" 
-    filters="@spEventType&lt;&gt; -2" >
-        <views.View type="week" showworkhours="1" />
-        <views.View type="month" />
-        <views.View type="day" />
-</html5scheduler>
-```
+The rest of this guide assumes that your Chicago Users are set in SharePoint for *(UTC-06:00) Central Time (US & Canada)* and your Berlin Users are set for *(UTC+01:00) Amsterdam, Berlin, Bern, Rome, Stockholm, Vienna*, etc...
 
-With these components in place the Scheduler should now look like this:
-![After](images/image002.jpg)
+## From SharePoint to SQL
+ListGuru, for on-prem SharePoint, and ListMirror, for SharePoint Online, is responsible for replicating SharePoint list items to SQL tables. SharePoint Event Lists are a special case for both of these tools. An event is treated differently when it is created/updated in SQL based on whether:
 
-#### Using State/End in a ListView Component
-Using the Midnight UTC start/end date from the HS Class in a ListView is a little easier.  We still get the start/end date as an offset of the current browser timezone, but since we are parsing that value in the listview anyway, we can parse it correctly using this function:
+* The event is a single event with a start/end time that exists within a single calendar day.
+* The event is a single event set for *all day*
+* The event is a single event with a start/end time that spans two or more calendar days.
+* The event is a recurring event 
+* The event is a recurring event set for all day
+* The event is a recurring event, with exceptions
 
-```javascript
-function AdjustAllDayEventLV(isallday, d) {
-      if (isallday) {
-        var dt = kendo.parseDate(d);
-	    dt.setMinutes(dt.getMinutes() + dt.getTimezoneOffset());
-	    return dt;
-      } else {
-        return kendo.parseDate(d);
-      }
-    }
-``` 
+To demonstrate this the following events were added to a SharePoint Event List, with the test user account time zone set to Chicago.
 
-Then, in the kendo template that render each event we call that function to parse the value into a date time 
+- **Alpha** - Single Event occurring at 1:00pm - 2:00pm on April 12, 2021
+- **Beta** - Single Event set for all day, April 12, 2021 
+- **Gamma** - Single Event from 1:00pm April 13 to 2:00pm April 14, 2021 
+- **Delta** - Recurring Event every Thursday from 1:00pm - 2:00pm for 4 weeks.  The 3rd week it is moved to 2pm 
+- **Epsilon** - Recurring Event, all day, every Friday for 4 weeks.  4th week set from 8:00pm to 12pm
+- **Zeta** - A single, all day event that spans Monday April 19th to Friday April 23rd, 2021. 
+- **Eta** - A recurring lunch event the first Monday of every month, for 12 months. 
 
-```xml
-<html5template name="evtmp" nativeencoding="1">
-    <div>
-        <embeddedhtml><![CDATA[
-        # 
-        eventdatestart = AdjustAllDayEventLV(eventisallday, eventdatestart); 
-        eventdateend = AdjustAllDayEventLV(eventisallday, eventdateend); 
-        #
-        <div style="display:flex">
-            <div style="margin:10px 10px">#: kendo.toString(eventdatestart, "MMM dd, hh:mm tt") #</div>
-            <div style="margin:10px 10px">#: kendo.toString(eventdateend, "MMM dd, hh:mm tt") #</div>
-            <div style="margin:10px 10px">#:title#</div>
-        </div>
-        ]]></embeddedhtml>
-    </div>
-    </html5template>
-```
+These entries will result in the following rows being created in the ListGuru SQL table. Note that all times have been stored as UTC values. 1:00pm = 18:00 and the beginning of the day in Chicago is store as 05:00 hours for April 12. These times vary based on daylight savings time, as you can set if event "Eta" below.
 
-#### To Query for a specific date.
+| Title | EventDate | EndDate | __EventType | fAllDayEvent | fRecurrence |
+|---------|-------------------------|-------------------------|:-----------:|:------------:|:-----------:|
+| Alpha | 2021-04-12 **18**:00:00.000 | 2021-04-12 **19**:00:00.000 |  0  | 0  |  0  |
+| Beta  | 2021-04-12 **05**:00:00.000 | 2021-04-13 **04**:59:00.000 |  0  | 1  |  0  |
+| Gamma | 2021-04-13 **18**:00:00.000 | 2021-04-14 **03**:59:59.000 |  -2 | 0  |  0  |
+| Gamma | 2021-04-14 **04**:00:00.000 | 2021-04-14 **19**:00:00.000 |  -2 | 0  |  0  |
+| Gamma | 2021-04-13 **18**:00:00.000 | 2021-04-14 **19**:00:00.000 |  -1 | 0  |  0  |
+| Delta | 2021-04-15 **18**:00:00.000 | 2021-05-06 **19**:00:00.000 |  1  | 0  |  1  |
+| Delta | 2021-04-15 **18**:00:00.000 | 2021-04-15 **19**:00:00.000 |  5  | 0  |  1  |
+| Delta | 2021-04-22 **18**:00:00.000 | 2021-04-22 **19**:00:00.000 |  5  | 0  |  1  |
+| Delta | 2021-05-06 **18**:00:00.000 | 2021-05-06 **19**:00:00.000 |  5  | 0  |  1  |
+| Delta | 2021-04-29 **19**:00:00.000 | 2021-04-29 **20**:00:00.000 |  4  | 0  |  1  |
+| Epsilon | 2021-04-23 **05**:00:00.000 | 2021-04-24 **04**:59:00.000 |  5  | 1  |  1  |
+| Epsilon | 2021-05-07 **05**:00:00.000 | 2021-05-08 **04**:59:00.000 |  5  | 1  |  1  |
+| Epsilon | 2021-04-16 **05**:00:00.000 | 2021-05-08 **04**:59:00.000 |  1  | 1  |  1  |
+| Epsilon | 2021-04-16 **05**:00:00.000 | 2021-04-17 **04**:59:00.000 |  5  | 1  |  1  |
+| Epsilon | 2021-04-30 **13**:00:00.000 | 2021-04-30 **17**:59:00.000 |  4  | 0  |  1  |
+| Zeta | 2021-04-20 **04**:00:00.000 | 2021-04-21 **03**:59:59.000 | -2 | 1 | 0 |
+| Zeta | 2021-04-21 **04**:00:00.000 | 2021-04-22 **03**:59:59.000 | -2 | 1 | 0 |
+| Zeta | 2021-04-22 **04**:00:00.000 | 2021-04-23 **03**:59:59.000 | -2 | 1 | 0 |
+| Zeta | 2021-04-23 **04**:00:00.000 | 2021-04-24 **04**:59:00.000 | -2 | 1 | 0 |
+| Zeta | 2021-04-19 **05**:00:00.000 | 2021-04-24 **04**:59:00.000 | -1 | 1 | 0 |
+| Zeta | 2021-04-19 **05**:00:00.000 | 2021-04-20 **03**:59:59.000 | -2 | 1 | 0 |
+| Eta  | 2021-01-04 **18**:00:00.000 | 2021-12-06 **19**:00:00.000 | 1  | 0 | 1 |
+| Eta  | 2021-01-04 **18**:00:00.000 | 2021-01-04 **19**:00:00.000 | 5  | 0 | 1 |
+| Eta  | 2021-02-01 **18**:00:00.000 | 2021-02-01 **19**:00:00.000 | 5  | 0 | 1 |
+| Eta  | 2021-03-01 **18**:00:00.000 | 2021-03-01 **19**:00:00.000 | 5  | 0 | 1 |
+| Eta  | 2021-04-05 **17**:00:00.000 | 2021-04-05 **18**:00:00.000 | 5  | 0 | 1 |
+| Eta  | 2021-05-03 **17**:00:00.000 | 2021-05-03 **18**:00:00.000 | 5  | 0 | 1 |
+| Eta  | 2021-06-07 **17**:00:00.000 | 2021-06-07 **18**:00:00.000 | 5  | 0 | 1 |
+| Eta  | 2021-07-05 **17**:00:00.000 | 2021-07-05 **18**:00:00.000 | 5  | 0 | 1 |
+| Eta  | 2021-08-02 **17**:00:00.000 | 2021-08-02 **18**:00:00.000 | 5  | 0 | 1 |
+| Eta  | 2021-09-06 **17**:00:00.000 | 2021-09-06 **18**:00:00.000 | 5  | 0 | 1 |
+| Eta  | 2021-10-04 **17**:00:00.000 | 2021-10-04 **18**:00:00.000 | 5  | 0 | 1 |
+| Eta  | 2021-11-01 **17**:00:00.000 | 2021-11-01 **18**:00:00.000 | 5  | 0 | 1 |
+| Eta  | 2021-12-06 **18**:00:00.000 | 2021-12-06 **19**:00:00.000 | 5  | 0 | 1 |
 
-One last part of the puzzle. If you are using a getresultset or a listview to filter for a specific date, you are not going to get the correct results because of how HS will form the query against a UCT datetime field so that it is using the offset of the HSTimeZoneID value. 
+The key to understanding these results, and when certain rows should be included or excluded in your query, is in understanding the event type rules that ListGuru/Mirror is following:
 
-To account for this, you should create a new field in the HS Class to case the start date as a SQL DATE Field.  This will give you the ability to query for Dec 25, 2020 without regards to any timezone issues.
 
-HS Field **EventDateQuery** 
+| Type  | Description  | fRecurrence | fAllDayEvent  | EventType |
+|----------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------|-----------------|---------------|
+| Single event |  An event created with the All Day Event and Recurrence checkboxes unselected.  |  False  |  False  |  0  |
+| All-day event  |  An event created with the All Day Event checkbox selected.  |  False  |  True |  0  |
+| Recurring event |  An event created with the Recurrence checkbox selected.  In the SharePoint calendar view, it has a recurrence icon in the All Events view.  Appears as a single master event on the All Events view, but as recurring instances on the Current Events and Calendar views.  |  True |  False  |  1  |
+| Recurring all-day event  |  Same as above, but with the All Day Event checkbox selected at creation time.  |  True |  True |  1  |
+|  Single Events, MultiDay, Single Row  |  Special Handshake value - this is the single row that spans the start and end date of the event  |  |  | -1  |
+|  Single Event, MultiDay MultiRow |  Special Handshake value, a row is returned for each day that an event occurs |  |  |  -2 |
+| Recurrence exception  |  Created by editing an instance of a recurring event.  Has a strike-through recurrence icon in the All Events view.  |  True |  False  |  4  |
+| All-day recurrence exception |  Same as above, but created by editing an instance of an all-day recurring event. |  True |  True |  4  |
+| Deleted instance of a recurring event  |  Created by deleting a instance of a recurring event.  Title is prefixed with “Deleted:” in the All Events view, and is hidden in the Current Events and Calendar views.  |  True |  False  |  3  |
+| Deleted instance of an all-day recurring event  |  Same as above, but created by deleting an instance of an all-day recurring event.  |  True |  True |  3  |
+|  Recurring Event Instance | Unique instance of a recurring event item  | True |  |  5  |
+
+To query this SQL table you must understand the Event Types that are created, and query according to your specific requirements. Most notably, whether you want events that span days to be treated as a single row, e.g. a list of upcoming events, or as a row for each day, as you would find in an agenda view. 
+
+> **There is likely no real use case where you would query for all rows in the table without excluding some event types.** 
+
+You will find it a valuable exercise to create several test events, with your SharePoint time zone set to different values, and evaluate the results in your ListGuru/Mirror tables. 
+
+## Querying Handshake Classes with UTC Dates
+Beginning with Handshake 3.8 a facility in included for automatically handling and appropriately translating date values that are stored in UTC. The support includes reporting the date in an appropriate time zone and translating filter values to UTC for SQL filters.
+
+### Identifying a field as a UTC field 
+The “field categories” portion of field in the Handshake toolkit is used to indicate that a field holds a UTC value. To make this selection go to the “Categories” tab of a field and check the “Universal Time Code” flag under “Field Type” as shown here: 
+
+![images/utcfield.png](images/utcfield.png)
+
+### How Handshake Translates Dates to/from UTC 
+Handshake has several options for determining what time zone should be used for translating dates. For each request Handshake selects a time zone by looking for a value in the following sources: 
+
+1. An input property sent to the skin named _HS_TimeZoneID. 
+2. A user property from HSUsers named TimeZoneID. 
+3. An HSApplicationOption entry with a key name of TimeZoneID. 
+4. The default time zone for the Handshake server. 
+
+Regardless of the source for the value, the list of values can be found in the "Name of Time Zone" column of the [list here](https://docs.microsoft.com/en-us/previous-versions/windows/embedded/ms912391(v=winembedded.11)).
+
+> Note: while the list from the link above should be accurate enough for most business purposes, it is no longer maintained by Microsoft.  The most up to date and accurate list would be returned from the windows 10 terminal command ``` tzutil /l ```
+
+The **best practice** would be #2 - setting the TimeZoneID in the HSUsers Class as a case statement using the user's primary office location.  For example:
+
 ```sql
-CAST( dbo.fn_AllDayAsUTC( ev.[fAllDayEvent], ev.[EventDate], 0) AS DATE)
-``` 
+CASE u.OfficeName 
+  WHEN 'Seattle' THEN 'Pacific Standard Time'
+  WHEN 'Dallas' THEN 'Central Standard Time'
+  WHEN 'Atlanta' THEN 'Eastern Standard Time'
+  WHEN 'London' THEN 'GMT Standard Time'
+  WHEN 'Berlin' THEN 'W. Europe Standard Time'
+  WHEN 'Singapore' THEN 'Singapore Standard Time'
+  ELSE 'GMT Standard Time' /* or some other appropriate fall back */
+END
+```
+Of course, your requirements may dictate a different option.
 
+With the HSTimeZoneID properly set, the Handshake query engine will form sql expressions that will take into account the time zone of the user requesting the data.  
+
+As an example, When logged into the HSServer Query Tool as a New York User you will see for this HS Query
+```SQL
+SELECT 
+    title, eventDateStart
+ FROM 
+    RNConnect_FirmEvents!<ALL>
+ WHERE 
+    @eventDateStart  = '4/12/2021'
+```
+The following SQL is generated:
+```SQL 
+SELECT ev.[Title] [title], 
+    ev.[EventDate] [eventDateStart] 
+FROM Connect_FirmEvents ev  
+WHERE (ev.[EventDate] >='2021-04-12 04:00:00' AND ev.[EventDate] <'2021-04-13 04:00:00') 
+```
+And for a Seattle User the same query results in this SQL Expression:
+```SQL 
+SELECT ev.[Title] [title], 
+    ev.[EventDate] [eventDateStart] 
+FROM Connect_FirmEvents ev  
+WHERE (ev.[EventDate] >='2021-04-12 07:00:00' AND ev.[EventDate] <'2021-04-13 07:00:00') 
+```
+
+> The best tool for evaluating, and thereby understanding, the effect of different time zone values is to use the Handshake Server Tool run from an RDP session to your development Handshake Server.
+
+### Returned Values for UTC and Non-UTC datetime fields
+Setting the Field Category to UTC and the User's HSTimeZoneID effects how those fields are queried. It will also effect the result value returned by the ODATA service. It will not however alter the value returned by server side elements like a GetResultSet. That is an important distinction to keep in mind when developing your solution. 
+
+To demonstrate this, consider a HS Class, demo_testData, generated from the following SQL
+```SQL
+WITH CTE AS 
+( Select GetDate()  as [d1] )
+SELECT	cte.d1 d1_notutc,	cte.d1 d1_utc
+FROM	cte 
+```
+In this example, both fields will be returned as the current date and time of the SQL Server. In our class we will set only d1_utc to have the category flag of "Universal Time Code".
+
+This handshake query, executed in the context of a pacific time user:
+```sql
+select d1_utc, d1_notutc  from demo_dataTest 
+where @d1_utc='4/12/2021' OR d1_notutc='4/12/2021'
+```
+Will produce this SQL 
+```sql
+;WITH CTE AS  
+( Select GetDate()  as [d1] ) 
+SELECT cte.d1 [d1_utc], cte.d1 [d1_notutc] 
+FROM cte  
+WHERE (cte.d1>='2021-04-12 07:00:00' AND cte.d1<'2021-04-13 07:00:00') 
+   OR (cte.d1>='2021-04-12' AND cte.d1<'2021-04-13') 
+```
+The Non-UTC date field will not attempt to apply any time zone. And we are purposefully saying one of these values is UTC and one is not, even though they both have the same raw value. 
+
+Now this query, which includes an exact time in the filter, will convert the supplied time relative to the UTC value for the first field, and the exact value for the 2nd:
+```
+select d1_utc, d1_notutc  from demo_dataTest 
+where @d1_utc = '4/12/2021 04:00' OR d1_notutc  = '4/12/2021 04:00'
+```
+```
+;WITH CTE AS  
+( Select GetDate()  as [d1] ) 
+SELECT cte.d1 [d1_utc], cte.d1 [d1_notutc] 
+FROM cte  
+WHERE (cte.d1='2021-04-12 11:00:00') OR (cte.d1='2021-04-12 04:00:00') 
+```
+In all instances, the server side results for the date and time are returned the same for both fields. 
+
+| d1_utc |   d1_notutc  |
+| ---------------- |  ---------------- |
+| 4/12/2021 5:42:5 |  4/12/2021 5:42:5 |
+
+But when you review the results when the same class is presented in a skin, and rendered by a user with a browser time zone set to Eastern Time, you will see a different story.
+
+Skin (note some modifications were made for clarity, not a valid HS SKin )
+```xml
+  <description />
+  <scripts />
+  <hiddencontrols>
+    <getresultset allowupdate="N" name="dtest" cols="d1_notutc,d1_utc" mpinfo="demo_dataTest" />
+  </hiddencontrols>
+  <body type="standardbody">
+    <div text="d1_notutc = {=dtest.d1_notutc}"></div>
+    <div text="d1_utc = {=dtest.d1_utc}" />
+    <div>
+      <html5grid name="g" mpinfo="demo_dataTest">
+        <columns.Column field="d1_notutc" title="Not UTC" 
+        template="#: kendo.toString(kendo.parseDate(d1_notutc),'M/dd/yyyy h:mm:ss tt') #" />
+        <columns.Column field="d1_utc" title="UTC" 
+        template="#: kendo.toString(kendo.parseDate(d1_utc),'M/dd/yyyy h:mm:ss tt') #" />
+      </html5grid>
+    </div>
+  </body>
+</page>
+``` 
+Results, as presented in the Content Designer Preview:
+
+![sample](images/sampleskin1.png)
+
+In the server side results and the "Not UTC" column in the kendo grid, the results were returned based on the current time of the SQL Server. In the Grid, the field with the UTC Field flag set, the results were provided by the ODATA service as UTC, and coverted by kendo to Eastern Time. 
+
+## Presenting Date and Times in Kendo Controls
+Regardless of the HSTimeZoneID the Handshake ODATA Web Service will deliver a datetime flagged as UTC as a string value that is easily parsed by the Kendo library in the form:
+```json
+"/Date(1618170877090)/"
+```
+That number is the number of milliseconds since Jan 1, 1970 and will **always** be interpreted as a UTC datetime.  But, keep in mind that value will be parsed in both native JavaScript and the Kendo date parser into the time zone of the browser.
+
+So for the value 1618170877090 which for UTC = Sun Apr 11 2021 19:54:37 GMT+0000, the following will be true on a machine set to New York time:
+```javascript
+new Date(1618170877090) 
+// output is  Sun Apr 11 2021 15:54:37 GMT-0400 (Eastern Daylight Time)
+kendo.toString(kendo.parseDate("/Date(1618170877090)/"),"MMM d, yyyy h:mm tt zzz"); 
+// output is  Apr 11, 2021 3:54 PM -04:00
+```
+
+As shown, the ODATA string is easily parsed to a javascript date by the kendo command **kendo.parseDate**.  You will see the following bit of code in almost every HTML5ListView/Template found:
+```javascript
+# var d = kendo.toString(kendo.parseDate(dateField),"MMM d, yyyy"); #
+<div>Date: #: d # </div>
+```
+
+In summary, when dealing with datetime fields stored in SQL you want to 
+
+- Set the field category to UTC in the handshake class
+- Think through your requirements for filtering rows from the table
+- Use kendo widgets (grid, scheduler or listview) to displays the data.
+
+At this point, it is probably not worth the effort to attempt to use server side controls like GetResultSet or Paged Repeater to display datasets that include a UTC based datetime field. 
