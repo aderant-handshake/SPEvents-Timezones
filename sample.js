@@ -27,14 +27,14 @@ function AdjustAllDayEvents(options, startField, endField, allDayField) {
                 try {
                     var dt = kendo.parseDate(event[startField]);
                     dt.setMinutes(dt.getMinutes() + dt.getTimezoneOffset());
-                    event[startField] = dt;
+                    event[startField] = dt.toJSON();
                 } catch(e) {
                     // nothing to do...
                 }
                 try {
                     var dt = kendo.parseDate(event[endField]);
                     dt.setMinutes(dt.getMinutes() + dt.getTimezoneOffset());
-                    event[endField] = dt;
+                    event[endField] = dt.toJSON();
                 } catch {
                     // nothing to do...
                 }
